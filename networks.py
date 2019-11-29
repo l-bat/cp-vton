@@ -55,10 +55,14 @@ class FeatureExtraction(nn.Module):
     def __init__(self, input_nc, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d, use_dropout=False):
         super(FeatureExtraction, self).__init__()
         downconv = nn.Conv2d(input_nc, ngf, kernel_size=4, stride=2, padding=1)
+        # TODO: self.model = nn.Sequential()
+        # self.model.add_module(downconv)
         model = [downconv, nn.ReLU(True), norm_layer(ngf)]
         for i in range(n_layers):
-            in_ngf = 2**i * ngf if 2**i * ngf < 512 else 512
-            out_ngf = 2**(i+1) * ngf if 2**i * ngf < 512 else 512
+            in_ngf = min(2**i * ngf, 512)
+            # in_ngf = 2**i * ngf if 2**i * ngf < 512 else 512
+            # out_ngf = 2**(i+1) * ngf if 2**i * ngf < 512 else 512
+            out_ngf = min(2 ** (i + 1) * ngf, 512)
             downconv = nn.Conv2d(in_ngf, out_ngf, kernel_size=4, stride=2, padding=1)
             model += [downconv, nn.ReLU(True)]
             model += [norm_layer(out_ngf)]
@@ -77,24 +81,45 @@ class FeatureL2Norm(torch.nn.Module):
         super(FeatureL2Norm, self).__init__()
 
     def forward(self, feature):
-        epsilon = 1e-6
-        norm = torch.pow(torch.sum(torch.pow(feature,2),1)+epsilon,0.5).unsqueeze(1).expand_as(feature)
-        return torch.div(feature,norm)
+        # epsilon = 1e-6
+        norm = torch.norm(feature, p=2, dim=1, keepdim=True)
+        # print("=---===--=--=-=-=-=-=-=-=-=-=-=-=")
+        # print("my", my.shape)
+        # norm = torch.pow(torch.sum(torch.pow(feature, 2), 1) + epsilon, 0.5).unsqueeze(1).expand_as(feature)
+        # print("origin", norm.shape)
+        # print("close", torch.allclose(my, norm))
+        return torch.div(feature, norm)
     
-class FeatureCorrelation(nn.Module):
-    def __init__(self):
-        super(FeatureCorrelation, self).__init__()
+from torch.autograd import Function
+class FeatureCorrelation(Function):
+    # def __init__(self):
+    #     super(FeatureCorrelation, self).__init__()
     
+    @staticmethod
+    def symbolic(g, feature_A, feature_B):
+        return g.op("Correlation", feature_A, feature_B)
+
+    @staticmethod
     def forward(self, feature_A, feature_B):
-        b,c,h,w = feature_A.size()
+        # print("feature_A.size()", feature_A.size())
+        # b, c, h, w = feature_A.size()
+        # print("feature_B.size()", feature_B.size())
         # reshape features for matrix multiplication
-        feature_A = feature_A.transpose(2,3).contiguous().view(b,c,h*w)
-        feature_B = feature_B.view(b,c,h*w).transpose(1,2)
+        feature_A = feature_A.transpose(2, 3).contiguous().view(1, 512, 16 * 12)
+        feature_B = feature_B.view(1, 512, 16 * 12).transpose(1, 2)
         # perform matrix mult.
-        feature_mul = torch.bmm(feature_B,feature_A)
-        correlation_tensor = feature_mul.view(b,h,w,h*w).transpose(2,3).transpose(1,2)
+        feature_mul = feature_B @ feature_A
+        # print("feature_mul", feature_mul.shape)
+        correlation_tensor = feature_mul.view(1, 16, 12, 16 * 12)
+        correlation_tensor = correlation_tensor.permute(0, 3, 1, 2)
+        # print("--------------------=--------------------")
+        # print("my", my.shape)
+        # correlation_tensor = feature_mul.view(b, h, w, h * w).transpose(2, 3).transpose(1, 2)
+        # print("correlation_tensor", correlation_tensor.shape)
+        # print("close", torch.allclose(my, correlation_tensor))
         return correlation_tensor
-    
+
+
 class FeatureRegression(nn.Module):
     def __init__(self, input_nc=512,output_dim=6, use_cuda=True):
         super(FeatureRegression, self).__init__()
@@ -136,7 +161,7 @@ class AffineGridGen(nn.Module):
     def forward(self, theta):
         theta = theta.contiguous()
         batch_size = theta.size()[0]
-        out_size = torch.Size((batch_size,self.out_ch,self.out_h,self.out_w))
+        out_size = torch.Size((batch_size, self.out_ch, self.out_h, self.out_w))
         return F.affine_grid(theta, out_size)
         
 class TpsGridGen(nn.Module):
@@ -149,7 +174,7 @@ class TpsGridGen(nn.Module):
         # create grid in numpy
         self.grid = np.zeros( [self.out_h, self.out_w, 3], dtype=np.float32)
         # sampling grid with dim-0 coords (Y)
-        self.grid_X,self.grid_Y = np.meshgrid(np.linspace(-1,1,out_w),np.linspace(-1,1,out_h))
+        self.grid_X, self.grid_Y = np.meshgrid(np.linspace(-1, 1, out_w), np.linspace(-1,1,out_h))
         # grid_X,grid_Y: size [1,H,W,1,1]
         self.grid_X = torch.FloatTensor(self.grid_X).unsqueeze(0).unsqueeze(3)
         self.grid_Y = torch.FloatTensor(self.grid_Y).unsqueeze(0).unsqueeze(3)
@@ -161,14 +186,14 @@ class TpsGridGen(nn.Module):
         if use_regular_grid:
             axis_coords = np.linspace(-1,1,grid_size)
             self.N = grid_size*grid_size
-            P_Y,P_X = np.meshgrid(axis_coords,axis_coords)
+            P_Y,P_X = np.meshgrid(axis_coords, axis_coords)
             P_X = np.reshape(P_X,(-1,1)) # size (N,1)
             P_Y = np.reshape(P_Y,(-1,1)) # size (N,1)
             P_X = torch.FloatTensor(P_X)
             P_Y = torch.FloatTensor(P_Y)
             self.P_X_base = P_X.clone()
             self.P_Y_base = P_Y.clone()
-            self.Li = self.compute_L_inverse(P_X,P_Y).unsqueeze(0)
+            self.Li = self.compute_L_inverse(P_X, P_Y).unsqueeze(0)
             self.P_X = P_X.unsqueeze(2).unsqueeze(3).unsqueeze(4).transpose(0,4)
             self.P_Y = P_Y.unsqueeze(2).unsqueeze(3).unsqueeze(4).transpose(0,4)
             if use_cuda:
@@ -179,30 +204,37 @@ class TpsGridGen(nn.Module):
 
             
     def forward(self, theta):
-        warped_grid = self.apply_transformation(theta,torch.cat((self.grid_X,self.grid_Y),3))
-        
+        warped_grid = self.apply_transformation(theta, torch.cat((self.grid_X, self.grid_Y), 3))
         return warped_grid
     
     def compute_L_inverse(self,X,Y):
         N = X.size()[0] # num of points (along dim 0)
         # construct matrix K
+        print("X", X.shape)
+        print("Y", Y.shape)
         Xmat = X.expand(N,N)
         Ymat = Y.expand(N,N)
-        P_dist_squared = torch.pow(Xmat-Xmat.transpose(0,1),2)+torch.pow(Ymat-Ymat.transpose(0,1),2)
-        P_dist_squared[P_dist_squared==0]=1 # make diagonal 1 to avoid NaN in log computation
-        K = torch.mul(P_dist_squared,torch.log(P_dist_squared))
+        print("Xmat", Xmat.shape)
+        print("Ymat", Ymat.shape)
+        P_dist_squared = torch.pow(Xmat - Xmat.transpose(0, 1), 2) + torch.pow(Ymat - Ymat.transpose(0, 1), 2)
+        # P_dist_squared[P_dist_squared == 0] = 1 # make diagonal 1 to avoid NaN in log computation
+        P_dist_squared = P_dist_squared + torch.eye(N)
+
+        K = torch.mul(P_dist_squared, torch.log(P_dist_squared))
         # construct matrix L
-        O = torch.FloatTensor(N,1).fill_(1)
-        Z = torch.FloatTensor(3,3).fill_(0)       
-        P = torch.cat((O,X,Y),1)
-        L = torch.cat((torch.cat((K,P),1),torch.cat((P.transpose(0,1),Z),1)),0)
+        # O = torch.FloatTensor(N,1).fill_(1)
+        O = torch.ones([N, 1], dtype=torch.float32)
+        Z = torch.zeros([3, 3], dtype=torch.float32)
+        # Z = torch.FloatTensor(3,3).fill_(0)       
+        P = torch.cat((O, X, Y), 1)
+        L = torch.cat((torch.cat((K, P), 1), torch.cat((P.transpose(0,1), Z), 1)), 0)
         Li = torch.inverse(L)
         if self.use_cuda:
             Li = Li.cuda()
         return Li
         
     def apply_transformation(self,theta,points):
-        if theta.dim()==2:
+        if theta.dim() == 2:
             theta = theta.unsqueeze(2).unsqueeze(3)
         # points should be in the [B,H,W,2] format,
         # where points[:,:,:,0] are the X coords  
@@ -211,8 +243,8 @@ class TpsGridGen(nn.Module):
         # input are the corresponding control points P_i
         batch_size = theta.size()[0]
         # split theta into point coordinates
-        Q_X=theta[:,:self.N,:,:].squeeze(3)
-        Q_Y=theta[:,self.N:,:,:].squeeze(3)
+        Q_X = theta[:,:self.N,:,:].squeeze(3)
+        Q_Y = theta[:,self.N:,:,:].squeeze(3)
         Q_X = Q_X + self.P_X_base.expand_as(Q_X)
         Q_Y = Q_Y + self.P_Y_base.expand_as(Q_Y)
         
@@ -220,63 +252,77 @@ class TpsGridGen(nn.Module):
         points_b = points.size()[0]
         points_h = points.size()[1]
         points_w = points.size()[2]
-        
+
         # repeat pre-defined control points along spatial dimensions of points to be transformed
-        P_X = self.P_X.expand((1,points_h,points_w,1,self.N))
-        P_Y = self.P_Y.expand((1,points_h,points_w,1,self.N))
-        
+        P_X = self.P_X.expand((1,points_h, points_w, 1, self.N))
+        P_Y = self.P_Y.expand((1,points_h, points_w, 1, self.N))
+
         # compute weigths for non-linear part
-        W_X = torch.bmm(self.Li[:,:self.N,:self.N].expand((batch_size,self.N,self.N)),Q_X)
-        W_Y = torch.bmm(self.Li[:,:self.N,:self.N].expand((batch_size,self.N,self.N)),Q_Y)
+        # print("=============================================")
+        # print("self.Li", self.Li.shape)
+        # print("self.Li[:,:self.N,:self.N]", self.Li[:,:self.N,:self.N].shape)
+        # print("batch_size self.N, self.N:", batch_size, self.N, self.N)
+        # x = self.Li[:,:self.N,:self.N].expand((batch_size, self.N, self.N))
+        # print("self.Li[:,:self.N,:self.N].expand((batch_size, self.N, self.N))", x.shape )
+        # print("Q_X", Q_X.shape)
+        # W_X = torch.bmm( self.Li[:,:self.N,:self.N].expand((batch_size, self.N, self.N)), Q_X)
+        # W_Y = torch.bmm( self.Li[:,:self.N,:self.N].expand((batch_size, self.N, self.N)), Q_Y)
+
+        W_X = torch.bmm( self.Li[:,:self.N,:self.N].expand((batch_size, self.N, self.N)), Q_X)
+        W_Y = torch.bmm( self.Li[:,:self.N,:self.N].expand((batch_size, self.N, self.N)), Q_Y)
         # reshape
         # W_X,W,Y: size [B,H,W,1,N]
-        W_X = W_X.unsqueeze(3).unsqueeze(4).transpose(1,4).repeat(1,points_h,points_w,1,1)
-        W_Y = W_Y.unsqueeze(3).unsqueeze(4).transpose(1,4).repeat(1,points_h,points_w,1,1)
+        W_X = W_X.unsqueeze(3).unsqueeze(4).transpose(1,4).repeat(1, points_h, points_w, 1, 1)
+        W_Y = W_Y.unsqueeze(3).unsqueeze(4).transpose(1,4).repeat(1, points_h, points_w, 1, 1)
+
         # compute weights for affine part
         A_X = torch.bmm(self.Li[:,self.N:,:self.N].expand((batch_size,3,self.N)),Q_X)
         A_Y = torch.bmm(self.Li[:,self.N:,:self.N].expand((batch_size,3,self.N)),Q_Y)
+
         # reshape
         # A_X,A,Y: size [B,H,W,1,3]
         A_X = A_X.unsqueeze(3).unsqueeze(4).transpose(1,4).repeat(1,points_h,points_w,1,1)
         A_Y = A_Y.unsqueeze(3).unsqueeze(4).transpose(1,4).repeat(1,points_h,points_w,1,1)
-        
+
         # compute distance P_i - (grid_X,grid_Y)
-        # grid is expanded in point dim 4, but not in batch dim 0, as points P_X,P_Y are fixed for all batch
-        points_X_for_summation = points[:,:,:,0].unsqueeze(3).unsqueeze(4).expand(points[:,:,:,0].size()+(1,self.N))
-        points_Y_for_summation = points[:,:,:,1].unsqueeze(3).unsqueeze(4).expand(points[:,:,:,1].size()+(1,self.N))
-        
-        if points_b==1:
-            delta_X = points_X_for_summation-P_X
-            delta_Y = points_Y_for_summation-P_Y
+        # grid is expanded in point dim 4, but not in batch dim 0, as points P_X, P_Y are fixed for all batch
+        points_X_for_summation = points[:,:,:,0].unsqueeze(3).unsqueeze(4).expand(points[:,:,:,0].size() + (1, self.N))
+        points_Y_for_summation = points[:,:,:,1].unsqueeze(3).unsqueeze(4).expand(points[:,:,:,1].size() + (1, self.N))
+
+        if points_b == 1:
+            delta_X = points_X_for_summation - P_X
+            delta_Y = points_Y_for_summation - P_Y
         else:
             # use expanded P_X,P_Y in batch dimension
-            delta_X = points_X_for_summation-P_X.expand_as(points_X_for_summation)
-            delta_Y = points_Y_for_summation-P_Y.expand_as(points_Y_for_summation)
-            
-        dist_squared = torch.pow(delta_X,2)+torch.pow(delta_Y,2)
+            delta_X = points_X_for_summation - P_X.expand_as(points_X_for_summation)
+            delta_Y = points_Y_for_summation - P_Y.expand_as(points_Y_for_summation)
+
+        dist_squared = torch.pow(delta_X, 2) + torch.pow(delta_Y, 2)
         # U: size [1,H,W,1,N]
-        dist_squared[dist_squared==0]=1 # avoid NaN in log computation
-        U = torch.mul(dist_squared,torch.log(dist_squared)) 
-        
+        print("dist_squared ", dist_squared.shape)
+        print("dist_squared[dist_squared==0]", dist_squared[dist_squared==0])
+        dist_squared[dist_squared==0] = 1 # avoid NaN in log computation
+        U = torch.mul(dist_squared, torch.log(dist_squared))
+
         # expand grid in batch dimension if necessary
         points_X_batch = points[:,:,:,0].unsqueeze(3)
         points_Y_batch = points[:,:,:,1].unsqueeze(3)
         if points_b==1:
             points_X_batch = points_X_batch.expand((batch_size,)+points_X_batch.size()[1:])
             points_Y_batch = points_Y_batch.expand((batch_size,)+points_Y_batch.size()[1:])
-        
+
         points_X_prime = A_X[:,:,:,:,0]+ \
                        torch.mul(A_X[:,:,:,:,1],points_X_batch) + \
                        torch.mul(A_X[:,:,:,:,2],points_Y_batch) + \
                        torch.sum(torch.mul(W_X,U.expand_as(W_X)),4)
-                    
+
         points_Y_prime = A_Y[:,:,:,:,0]+ \
                        torch.mul(A_Y[:,:,:,:,1],points_X_batch) + \
                        torch.mul(A_Y[:,:,:,:,2],points_Y_batch) + \
                        torch.sum(torch.mul(W_Y,U.expand_as(W_Y)),4)
-        
+
         return torch.cat((points_X_prime,points_Y_prime),3)
-        
+
 # Defines the Unet generator.
 # |num_downs|: number of downsamplings in UNet. For example,
 # if |num_downs| == 7, image of size 128x128 will become of size 1x1
@@ -288,7 +334,9 @@ class UnetGenerator(nn.Module):
         # construct unet structure
         unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer, innermost=True)
         for i in range(num_downs - 5):
+            # one  iter
             unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer, use_dropout=use_dropout)
+
         unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
         unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
         unet_block = UnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
@@ -299,7 +347,8 @@ class UnetGenerator(nn.Module):
     def forward(self, input):
         return self.model(input)
 
-
+sizes = [[8, 6], [16, 12], [32, 24], [64, 48], [128, 96], [256, 192]]
+i = 0
 # Defines the submodule with skip connection.
 # X -------------------identity---------------------- X
 #   |-- downsampling -- |submodule| -- upsampling --|
@@ -308,7 +357,7 @@ class UnetSkipConnectionBlock(nn.Module):
                  submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False):
         super(UnetSkipConnectionBlock, self).__init__()
         self.outermost = outermost
-        use_bias = norm_layer == nn.InstanceNorm2d
+        use_bias = (norm_layer == nn.InstanceNorm2d)
 
         if input_nc is None:
             input_nc = outer_nc
@@ -319,25 +368,30 @@ class UnetSkipConnectionBlock(nn.Module):
         uprelu = nn.ReLU(True)
         upnorm = norm_layer(outer_nc)
 
+        global i
         if outermost:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
+            upsample = nn.Upsample(size=sizes[i], mode='bilinear')
+            i += 1
             upconv = nn.Conv2d(inner_nc * 2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
             down = [downconv]
             up = [uprelu, upsample, upconv, upnorm]
             model = down + [submodule] + up
         elif innermost:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
+            upsample = nn.Upsample(size=sizes[i], mode='bilinear')
+            i += 1
             upconv = nn.Conv2d(inner_nc, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
             down = [downrelu, downconv]
             up = [uprelu, upsample, upconv, upnorm]
             model = down + up
         else:
-            upsample = nn.Upsample(scale_factor=2, mode='bilinear')
+            upsample = nn.Upsample(size=sizes[i], mode='bilinear')
+            i += 1
             upconv = nn.Conv2d(inner_nc*2, outer_nc, kernel_size=3, stride=1, padding=1, bias=use_bias)
             down = [downrelu, downconv, downnorm]
             up = [uprelu, upsample, upconv, upnorm]
 
             if use_dropout:
+                # self.my_model.add_module(nn.Dropout(0.5))
                 model = down + [submodule] + up + [nn.Dropout(0.5)]
             else:
                 model = down + [submodule] + up
@@ -401,38 +455,74 @@ class VGGLoss(nn.Module):
         return loss
 
 class GMM(nn.Module):
-    """ Geometric Matching Module
-    """
+    """ Geometric Matching Module """
     def __init__(self, opt):
         super(GMM, self).__init__()
-        self.extractionA = FeatureExtraction(22, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d) 
+        self.extractionA = FeatureExtraction(22, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
         self.extractionB = FeatureExtraction(3, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
         self.l2norm = FeatureL2Norm()
         self.correlation = FeatureCorrelation()
-        self.regression = FeatureRegression(input_nc=192, output_dim=2*opt.grid_size**2, use_cuda=True)
-        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=True, grid_size=opt.grid_size)
-        
+        self.regression = FeatureRegression(input_nc=192, output_dim=2*opt.grid_size**2, use_cuda=False)
+        self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=False, grid_size=opt.grid_size)
+
     def forward(self, inputA, inputB):
         featureA = self.extractionA(inputA)
         featureB = self.extractionB(inputB)
         featureA = self.l2norm(featureA)
         featureB = self.l2norm(featureB)
+        # correlation = FeatureCorrelation.apply(featureA, featureB)
         correlation = self.correlation(featureA, featureB)
 
         theta = self.regression(correlation)
         grid = self.gridGen(theta)
+        # print("grid", grid.shape)
+        # return theta
         return grid, theta
+
+class GMM_A(nn.Module):
+    def __init__(self):
+        super(GMM_A, self).__init__()
+        self.extractionA = FeatureExtraction(22, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
+        self.l2norm = FeatureL2Norm()
+
+    def forward(self, inputA):
+        featureA = self.extractionA(inputA)
+        featureA = self.l2norm(featureA)
+        return featureA
+
+class GMM_B(nn.Module):
+    def __init__(self):
+        super(GMM_B, self).__init__()
+        self.extractionB = FeatureExtraction(3, ngf=64, n_layers=3, norm_layer=nn.BatchNorm2d)
+        self.l2norm = FeatureL2Norm()
+
+    def forward(self, inputB):
+        featureB = self.extractionB(inputB)
+        featureB = self.l2norm(featureB)
+        return featureB
+
+
+class Regression(nn.Module):
+    def __init__(self, opt):
+        super(Regression, self).__init__()
+        self.regression = FeatureRegression(input_nc=192, output_dim=2*opt.grid_size**2, use_cuda=False)
+        # self.gridGen = TpsGridGen(opt.fine_height, opt.fine_width, use_cuda=False, grid_size=opt.grid_size)
+
+    def forward(self, correlation):
+        theta = self.regression(correlation)
+        return theta
 
 def save_checkpoint(model, save_path):
     if not os.path.exists(os.path.dirname(save_path)):
         os.makedirs(os.path.dirname(save_path))
 
     torch.save(model.cpu().state_dict(), save_path)
+    path_full_model = save_path.split('.')[0] + "_full" + ".pth"
+    torch.save(model.cpu(), path_full_model)
     model.cuda()
 
 def load_checkpoint(model, checkpoint_path):
     if not os.path.exists(checkpoint_path):
         return
     model.load_state_dict(torch.load(checkpoint_path))
-    model.cuda()
-
+    #model.cuda()

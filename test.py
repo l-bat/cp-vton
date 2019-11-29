@@ -7,10 +7,11 @@ import argparse
 import os
 import time
 from cp_dataset import CPDataset, CPDataLoader
-from networks import GMM, UnetGenerator, load_checkpoint
+from networks import GMM, UnetGenerator, load_checkpoint, GMM_A, GMM_B, Regression
 
 from tensorboardX import SummaryWriter
 from visualization import board_add_image, board_add_images, save_images
+import numpy as np
 
 
 def get_opt():
@@ -38,7 +39,7 @@ def get_opt():
     return opt
 
 def test_gmm(opt, test_loader, model, board):
-    model.cuda()
+    #model.cuda()
     model.eval()
 
     base_name = os.path.basename(opt.checkpoint)
@@ -56,17 +57,30 @@ def test_gmm(opt, test_loader, model, board):
         iter_start_time = time.time()
         
         c_names = inputs['c_name']
-        im = inputs['image'].cuda()
-        im_pose = inputs['pose_image'].cuda()
-        im_h = inputs['head'].cuda()
-        shape = inputs['shape'].cuda()
-        agnostic = inputs['agnostic'].cuda()
-        c = inputs['cloth'].cuda()
-        cm = inputs['cloth_mask'].cuda()
-        im_c =  inputs['parse_cloth'].cuda()
-        im_g = inputs['grid_image'].cuda()
+        im = inputs['image']#.cuda()
+        im_pose = inputs['pose_image']#.cuda()
+        im_h = inputs['head']#.cuda()
+        shape = inputs['shape']#.cuda()
+        agnostic = inputs['agnostic']#.cuda()
+        c = inputs['cloth']#.cuda()
+        cm = inputs['cloth_mask']#.cuda()
+        im_c =  inputs['parse_cloth']#.cuda()
+        im_g = inputs['grid_image']#.cuda()
             
-        grid, theta = model(agnostic, c)
+        inp1 = agnostic.numpy()
+        inp2 = c.numpy()
+        import numpy as np
+        np.save('inp1_gmm', inp1)
+        np.save('inp2_gmm', inp2)
+        torch.onnx.export(model, (agnostic, c), 'gmm.onnx')
+
+        theta = model(agnostic, c)
+        # grid, theta = model(agnostic, c)
+
+        # np.save('out_gmm', grid)
+        np.save('out_gmm_theta', theta.numpy())
+        break
+
         warped_cloth = F.grid_sample(c, grid, padding_mode='border')
         warped_mask = F.grid_sample(cm, grid, padding_mode='zeros')
         warped_grid = F.grid_sample(im_g, grid, padding_mode='zeros')
@@ -78,15 +92,69 @@ def test_gmm(opt, test_loader, model, board):
         save_images(warped_cloth, c_names, warp_cloth_dir) 
         save_images(warped_mask*2-1, c_names, warp_mask_dir) 
 
+
+
         if (step+1) % opt.display_count == 0:
             board_add_images(board, 'combine', visuals, step+1)
             t = time.time() - iter_start_time
             print('step: %8d, time: %.3f' % (step+1, t), flush=True)
         
+def test_gmm_a(opt, test_loader, model):
+    model.eval()
+
+    for step, inputs in enumerate(test_loader.data_loader):
+        agnostic = inputs['agnostic']
+           
+        inp1 = agnostic.numpy()
+        import numpy as np
+        np.save('feature_a', inp1)
+        torch.onnx.export(model, agnostic, 'feature_a.onnx')
+
+        theta = model(agnostic)
+        np.save('out_feature_a', theta.numpy())
+        break
+
+
+def test_gmm_b(opt, test_loader, model):
+    model.eval()
+
+    for step, inputs in enumerate(test_loader.data_loader):
+        c = inputs['cloth']
+
+        inp2 = c.numpy()
+        
+        import numpy as np
+        np.save('feature_b', inp2)
+        torch.onnx.export(model, c, 'feature_b.onnx')
+
+        theta = model(c)
+        np.save('out_feature_b', theta.numpy())
+        break
+
+
+def test_regression(opt, feature_A, feature_B, model):
+    feature_A = torch.from_numpy(feature_A)
+    feature_B = torch.from_numpy(feature_B)
+    feature_A = feature_A.transpose(2, 3)
+    feature_A = feature_A.contiguous().view(1, 512, 16 * 12)
+    feature_B = feature_B.view(1, 512, 16 * 12)
+    feature_B = feature_B.transpose(1, 2)
+    feature_mul = torch.bmm(feature_B, feature_A)
+    correlation_tensor = feature_mul.view(1, 16, 12, 16 * 12)
+    input1 = correlation_tensor.permute(0, 3, 1, 2)
+
+    model.eval()
+    theta = model(input1)
+    np_inp = input1.numpy()
+    np.save('regression', np_inp)
+    torch.onnx.export(model, input1, 'regression.onnx')
+    np.save('out_regression', theta.numpy())
+
+
 
 
 def test_tom(opt, test_loader, model, board):
-    model.cuda()
+    #model.cuda()
     model.eval()
     
     base_name = os.path.basename(opt.checkpoint)
@@ -101,16 +169,31 @@ def test_tom(opt, test_loader, model, board):
         iter_start_time = time.time()
         
         im_names = inputs['im_name']
-        im = inputs['image'].cuda()
+        im = inputs['image']#.cuda()
         im_pose = inputs['pose_image']
         im_h = inputs['head']
         shape = inputs['shape']
 
-        agnostic = inputs['agnostic'].cuda()
-        c = inputs['cloth'].cuda()
-        cm = inputs['cloth_mask'].cuda()
+        agnostic = inputs['agnostic']#.cuda()
+        c = inputs['cloth']#.cuda()
+        cm = inputs['cloth_mask']#.cuda()
         
         outputs = model(torch.cat([agnostic, c],1))
+
+        inp1 = torch.cat([agnostic, c],1).numpy()
+        print("inp1", inp1.shape)
+        import numpy as np
+        np.save('inp_tom', inp1)
+        import onnx
+        onnx_inp = torch.cat([agnostic, c], 1)
+        torch.onnx.export(model, onnx_inp, 'tom.onnx')
+
+        np.save('out_tom', outputs.numpy())
+
+        # from torchsummary import summary
+        # summary(model, input_size=inp1.shape[1:])
+        break
+
         p_rendered, m_composite = torch.split(outputs, 3,1)
         p_rendered = F.tanh(p_rendered)
         m_composite = F.sigmoid(m_composite)
@@ -154,6 +237,20 @@ def main():
         load_checkpoint(model, opt.checkpoint)
         with torch.no_grad():
             test_tom(opt, train_loader, model, board)
+    elif opt.stage == 'GMM_A':
+        model = GMM_A()
+        with torch.no_grad():
+            test_gmm_a(opt, train_loader, model)
+    elif opt.stage == 'GMM_B':
+        model = GMM_B()
+        with torch.no_grad():
+            test_gmm_b(opt, train_loader, model)
+    elif opt.stage == 'Regression':
+        model = Regression(opt)
+        feature_a = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/out_feature_a.npy')
+        feature_b = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/out_feature_b.npy')
+        with torch.no_grad():
+            test_regression(opt, feature_a, feature_b, model)
     else:
         raise NotImplementedError('Model [%s] is not implemented' % opt.stage)
   
