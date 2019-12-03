@@ -3,47 +3,47 @@ import numpy as np
 
 print(cv.__version__)
 
-# class CorrelationLayer(object):
-#     def __init__(self, params, blobs):
-#          super(CorrelationLayer, self).__init__()
+class CorrelationLayer(object):
+    def __init__(self, params, blobs):
+         super(CorrelationLayer, self).__init__()
 
-#     def getMemoryShapes(self, inputs):
-#         fetureAShape = inputs[0]
-#         b, c, h, w = fetureAShape
-#         return [[b, h * w, h, w]]
+    def getMemoryShapes(self, inputs):
+        fetureAShape = inputs[0]
+        b, c, h, w = fetureAShape
+        return [[b, h * w, h, w]]
 
-#     def forward(self, inputs):
-#         feature_A, feature_B = inputs
-#         b, c, h, w = feature_A.shape
-#         feature_A = feature_A.transpose(0, 1, 3, 2)
-#         feature_A = np.reshape(feature_A, (b, c, h * w))
-#         feature_B = np.reshape(feature_B, (b, c, h * w))
-#         feature_B = feature_B.transpose(0, 2, 1)
-#         feature_mul = feature_B @ feature_A
-#         feature_mul= np.reshape(feature_mul, (b, h, w, h * w))
-#         feature_mul = feature_mul.transpose(0, 1, 3, 2)
-#         correlation_tensor = feature_mul.transpose(0, 2, 1, 3)
-#         # correlation_tensor = np.ascontiguousarray(correlation_tensor)
-#         return [correlation_tensor]
-
-
-# cv.dnn_registerLayer('Correlation', CorrelationLayer)
-
-# onnxmodel = "gmm.onnx"
-# inp1 = np.load("inp1_gmm.npy")
-# inp2 = np.load("inp2_gmm.npy")
-# ref = np.load("out_gmm_theta.npy")
-
-# net = cv.dnn.readNet(onnxmodel)
-
-# net.setInput(inp1, "input.1")
-# net.setInput(inp2, "input.18")
-# out = net.forward()
-
-# ref = np.load('out_gmm_theta.npy')
+    def forward(self, inputs):
+        feature_A, feature_B = inputs
+        b, c, h, w = feature_A.shape
+        feature_A = feature_A.transpose(0, 1, 3, 2)
+        feature_A = np.reshape(feature_A, (b, c, h * w))
+        feature_B = np.reshape(feature_B, (b, c, h * w))
+        feature_B = feature_B.transpose(0, 2, 1)
+        feature_mul = feature_B @ feature_A
+        feature_mul= np.reshape(feature_mul, (b, h, w, h * w))
+        feature_mul = feature_mul.transpose(0, 1, 3, 2)
+        correlation_tensor = feature_mul.transpose(0, 2, 1, 3)
+        correlation_tensor = np.ascontiguousarray(correlation_tensor)
+        return [correlation_tensor]
 
 
-# # print(max(abs(out - ref)))
+cv.dnn_registerLayer('Correlation', CorrelationLayer)
+
+onnxmodel = "gmm.onnx"
+inp1 = np.load("inp1_gmm.npy")
+inp2 = np.load("inp2_gmm.npy")
+ref = np.load("out_gmm_theta.npy")
+
+net = cv.dnn.readNet(onnxmodel)
+
+net.setInput(inp1, "input.1")
+net.setInput(inp2, "input.18")
+out = net.forward()
+
+ref = np.load('out_gmm_theta.npy')
+print(np.max(abs(out - ref)))
+
+
 
 from numpy.linalg import inv, det
 def compute_L_inverse(X, Y):
@@ -140,7 +140,6 @@ def apply_transformation(theta, points, N, P_X, P_Y):
     A_Y = np.repeat(A_Y, points_h, axis=1)
     A_Y = np.repeat(A_Y, points_w, axis=2)
     
-
     points_X_for_summation = np.expand_dims(np.expand_dims(points[:, :, :, 0], axis=3), axis=4)
     points_X_for_summation = expand_torch(points_X_for_summation, points[:, :, :, 0].shape + (1, N))
 
@@ -186,9 +185,87 @@ def postprocess(theta):
         print("warped_grid", warped_grid.shape)
         return warped_grid
 
-if __name__ == "__main__":
-    # X = np.random.uniform(-1, 1, size=[25, 1])
-    # Y = np.random.uniform(-1, 1, size=[25, 1])
-    # Li = compute_L_inverse(X, Y)
-    theta = np.random.uniform(-1, 1, size=(1, 50))
-    grid = postprocess(theta)
+
+def bilinear_sampler(img, grid):
+    x, y = grid[:,:,:,0], grid[:,:,:,1]
+    H = img.shape[2]
+    W = img.shape[3]
+    max_y = H - 1
+    max_x = W - 1
+
+    # rescale x and y to [0, W-1/H-1]
+    x = 0.5 * (x + 1.0) * (max_x - 1)
+    y = 0.5 * (y + 1.0) * (max_y - 1)
+
+    # grab 4 nearest corner points for each (x_i, y_i)
+    x0 = np.floor(x).astype(int)
+    x1 = x0 + 1
+    y0 = np.floor(y).astype(int)
+    y1 = y0 + 1
+
+    # clip to range [0, H-1/W-1] to not violate img boundaries
+    x0 = np.clip(x0, 0, max_x)
+    x1 = np.clip(x1, 0, max_x)
+    y0 = np.clip(y0, 0, max_y)
+    y1 = np.clip(y1, 0, max_y)
+
+    # get pixel value at corner coords
+    img = img.reshape(-1, H, W)
+    Ia = img[:, y0, x0]
+    Ib = img[:, y1, x0]
+    Ic = img[:, y0, x1]
+    Id = img[:, y1, x1]
+
+    # calculate deltas
+    wa = (x1 - x) * (y1 - y)
+    wb = (x1 - x) * (y  - y0)
+    wc = (x - x0) * (y1 - y)
+    wd = (x - x0) * (y  - y0)
+
+    # add dimension for addition
+    wa = np.expand_dims(wa, axis=0)
+    wb = np.expand_dims(wb, axis=0)
+    wc = np.expand_dims(wc, axis=0)
+    wd = np.expand_dims(wd, axis=0)
+
+    # compute output
+    out = wa*Ia + wb*Ib + wc*Ic + wd*Id
+    return out
+
+
+
+
+# import torch
+
+# if __name__ == "__main__":
+#     # X = np.random.uniform(-1, 1, size=[25, 1])
+#     # Y = np.random.uniform(-1, 1, size=[25, 1])
+#     # Li = compute_L_inverse(X, Y)
+
+#     # theta = np.random.uniform(-1, 1, size=(1, 50))
+#     # theta = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/out_gmm_theta.npy')
+#     # grid = postprocess(theta)
+#     # ref = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/out_gmm_grid.npy')
+#     # print("grid", np.max(grid))
+#     # print("ref", np.max(ref))
+#     # print(np.max(abs(grid - ref)))
+
+#     grid = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/grid_sample1.npy')
+#     cm = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/cm_sample1.npy')
+#     ref = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/warped_mask_sample1.npy')
+#     # print(grid.shape)
+#     # print(cm.shape)
+#     print(ref.shape)
+#     res = bilinear_sampler(cm, grid)
+#     # print("res", res.shape)
+#     print("res", np.min(res))
+#     print("ref", np.min(ref))
+#     print("max diff =", np.max(abs(res - ref)))
+
+#     print("ref.reshape(-1, ref.shape[2], ref.shape[3])", ref.reshape(-1, ref.shape[2], ref.shape[3]).shape)
+#     image_ref = ref.reshape(ref.shape[2], ref.shape[3], -1)
+#     cv.imshow("origin", image_ref)
+#     cv.imshow("opencv", res.reshape(ref.shape[2], ref.shape[3], -1))
+#     cv.waitKey()
+
+#     # warped_mask = F.grid_sample(img, grid, padding_mode='zeros')
