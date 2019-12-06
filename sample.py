@@ -179,23 +179,12 @@ def apply_transformation(theta, points, N, P_X, P_Y):
 
 def postprocess(theta):
         grid_X, grid_Y, N, P_X, P_Y = prepare_to_transform()
-        print("X", grid_X.shape)
-        print("Y", grid_Y.shape)
         warped_grid = apply_transformation(theta, np.concatenate((grid_X, grid_Y), axis=3), N, P_X, P_Y)
-        print("warped_grid", warped_grid.shape)
         return warped_grid
 
 
 def bilinear_sampler(img, grid):
     x, y = grid[:,:,:,0], grid[:,:,:,1]
-    # print("x", np.min(x), np.max(x))
-    # print("y", np.min(y), np.max(y))
-
-    # x = np.where(x < -1, 0, x)
-    # x = np.where(x > 1 , 0, x)
-
-    # y = np.where(y < -1 , 0, y)
-    # y = np.where(y > 1 , 0, y)
 
     H = img.shape[2]
     W = img.shape[3]
@@ -211,54 +200,25 @@ def bilinear_sampler(img, grid):
     x1 = x0 + 1
     y0 = np.floor(y).astype(int)
     y1 = y0 + 1
-    # print("H x W", H, W)
 
-    # print("x0", np.min(x0), np.max(x0))
-    # print("x1", np.min(x1), np.max(x1))
-    # print("y0", np.min(y0), np.max(y0))
-    # print("y1", np.min(y1), np.max(y1))
-
+    # calculate deltas
     wa = (x1 - x) * (y1 - y)
     wb = (x1 - x) * (y  - y0)
     wc = (x - x0) * (y1 - y)
     wd = (x - x0) * (y  - y0)
 
     # clip to range [0, H-1/W-1] to not violate img boundaries
-
-    # x0 = np.where(x < 0, 0, x0)
-    # x0 = np.where(x > max_x, 0, x0)
-
-    # x1 = np.where(x < 0, 0, x1)
-    # x1 = np.where(x > max_x, 0, x1)
-
-    # y0 = np.where(y < 0, 0, y0)
-    # y0 = np.where(y > max_y, 0, y0)
-
-    # y1 = np.where(y < 0, 0, y1)
-    # y1 = np.where(y > max_y, 0, y1)
-
-    x0 = np.clip(x0, 0, max_x) # border
+    x0 = np.clip(x0, 0, max_x) 
     x1 = np.clip(x1, 0, max_x)
-    y0 = np.clip(y0, 0, max_y) #0.9582672119140625
+    y0 = np.clip(y0, 0, max_y) 
     y1 = np.clip(y1, 0, max_y)
 
     # get pixel value at corner coords
     img = img.reshape(-1, H, W)
-    # print("y0", y0.shape)
-    # print("x0", x0.shape)
-    # print("img", img.shape)
     Ia = img[:, y0, x0]
-    # print("Ia", Ia.shape)
     Ib = img[:, y1, x0]
     Ic = img[:, y0, x1]
     Id = img[:, y1, x1]
-
-    # calculate deltas
-    # wa = (x1 - x) * (y1 - y)
-    # wb = (x1 - x) * (y  - y0)
-    # wc = (x - x0) * (y1 - y)
-    # wd = (x - x0) * (y  - y0)
-
 
     # add dimension for addition
     wa = np.expand_dims(wa, axis=0)
@@ -268,18 +228,55 @@ def bilinear_sampler(img, grid):
 
     # compute output
     out = wa*Ia + wb*Ib + wc*Ic + wd*Id
-
-    # out[out == 0] = 1
-
-    # print("max", np.min(out))
     return out
 
 
+def tom():
+    onnxmodel = "tom.onnx"
+    inp1 = np.load("inp_tom.npy")
+    ref = np.load("out_tom.npy")
+
+    net = cv.dnn.readNet(onnxmodel)
+
+    net.setInput(inp1)
+    net.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV)
+    net.setPreferableTarget(cv.dnn.DNN_TARGET_CPU)
+    out = net.forward()
+    print("net diff =", np.max(abs(out - ref)))
 
 
-# import torch
+    p_rendered, m_composite = np.split(out, [3], axis=1)
+    p_rendered = np.tanh(p_rendered)
+
+    from scipy.special import expit as sigmoid
+    m_composite = sigmoid(m_composite)
+
+    c = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/c.npy')
+    print("c", c.shape)
+
+    p_tryon = c * m_composite + p_rendered * (1 - m_composite)
+    print("p", p_tryon.shape)
+
+    torch_res = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/p_tryon.npy')
+
+    # c_res = c.reshape(c.shape[2], c.shape[3], -1)
+
+    if c.shape[0] == 1:
+        c = c.squeeze(0)
+    if c.shape[0] == 3:
+        c = c.swapaxes(0, 1).swapaxes(1, 2)
+
+    cv.imshow("c", c)
+    rgb_p_tryon = cv.cvtColor(p_tryon.squeeze(0).swapaxes(0, 1).swapaxes(1, 2), cv.COLOR_BGR2RGB)
+    rgb_torch_res = cv.cvtColor(torch_res.squeeze(0).swapaxes(0, 1).swapaxes(1, 2), cv.COLOR_BGR2RGB)    
+    cv.imshow("opencv", rgb_p_tryon)
+    cv.imshow("origin", rgb_torch_res)
+    # print("max diff =", np.max(abs(p_tryon - torch_res)))
+    cv.waitKey()
+
 
 if __name__ == "__main__":
+    tom()
     # X = np.random.uniform(-1, 1, size=[25, 1])
     # Y = np.random.uniform(-1, 1, size=[25, 1])
     # Li = compute_L_inverse(X, Y)
@@ -292,32 +289,32 @@ if __name__ == "__main__":
     # print("ref", np.max(ref))
     # print(np.max(abs(grid - ref)))
 
-    grid = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/grid_sample1.npy')
-    cm = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/cm_sample1.npy')
-    ref = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/warped_mask_sample1.npy')
-    # print(grid.shape)
-    # print(cm.shape)
-    print(ref.shape)
-    res = bilinear_sampler(cm, grid)
-    print("res", np.min(res))
-    print("ref", np.min(ref))
-    print("max diff =", np.max(abs(res - ref)))
-    print("ref", ref.shape)
-    print("res", res.shape)
+    # grid = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/grid_sample1.npy')
+    # cm = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/cm_sample1.npy')
+    # ref = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/warped_mask_sample1.npy')
+    # # print(grid.shape)
+    # # print(cm.shape)
+    # print(ref.shape)
+    # res = bilinear_sampler(cm, grid)
+    # print("res", np.min(res))
+    # print("ref", np.min(ref))
+    # print("max diff =", np.max(abs(res - ref)))
+    # print("ref", ref.shape)
+    # print("res", res.shape)
 
-    # image_ref = ref.reshape(ref.shape[2], ref.shape[3], -1)
+    # # image_ref = ref.reshape(ref.shape[2], ref.shape[3], -1)
+    # # cv.imshow("origin", image_ref)
+    # # cv.imshow("opencv", res.reshape(ref.shape[2], ref.shape[3], -1))
+    # # cv.waitKey()
+
+    # # warped_mask = F.grid_sample(img, grid, padding_mode='zeros')
+
+    # c = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/c_sample0.npy')
+    # cloth_ref = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/warped_cloth_sample0.npy')
+    # warped_cloth = bilinear_sampler(c, grid)
+    # print("max diff =", np.max(abs(cloth_ref - warped_cloth)))
+
+    # image_ref = cloth_ref.reshape(cloth_ref.shape[2], cloth_ref.shape[3], -1)
     # cv.imshow("origin", image_ref)
-    # cv.imshow("opencv", res.reshape(ref.shape[2], ref.shape[3], -1))
+    # cv.imshow("opencv", warped_cloth.reshape(warped_cloth.shape[2], warped_cloth.shape[3], -1))
     # cv.waitKey()
-
-    # warped_mask = F.grid_sample(img, grid, padding_mode='zeros')
-
-    c = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/c_sample0.npy')
-    cloth_ref = np.load('/home/liubov/course_work/cluster/user/lbatanin/cp-vton/warped_cloth_sample0.npy')
-    warped_cloth = bilinear_sampler(c, grid)
-    print("max diff =", np.max(abs(cloth_ref - warped_cloth)))
-
-    image_ref = cloth_ref.reshape(cloth_ref.shape[2], cloth_ref.shape[3], -1)
-    cv.imshow("origin", image_ref)
-    cv.imshow("opencv", warped_cloth.reshape(warped_cloth.shape[2], warped_cloth.shape[3], -1))
-    cv.waitKey()
