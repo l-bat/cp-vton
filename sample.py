@@ -9,7 +9,6 @@ print(cv.__version__)
 
 data_dir = os.path.join('data', 'test')
 cloth_dir = 'cloth'
-pose_dir = 'pose'
 image_dir = 'image'
 segm_dir = 'image-parse'
 
@@ -19,81 +18,45 @@ def get_cloth(cloth_name='015392_1.jpg', cloth_dir=cloth_dir):
     c = cv.dnn.blobFromImage(cloth, 1.0 / 127.5, (cloth.shape[1], cloth.shape[0]), (127.5, 127.5, 127.5), True, crop=False)
     return c
 
-# def get_segmentation(image_name='000074_0.jpg', segm_dir=segm_dir, model_path='/home/liubov/course_work/segmentation/LIP_JPPNet/out_shape_384.pb'):
-#     # image_path = os.path.join(data_dir, image_dir, image_name)
-#     # segm_image = parse_human(image_path, model_path)
-#     segm_path = os.path.join(data_dir, segm_dir, image_name.split('.')[0] + '.png')
-#     ref = cv.imread(segm_path)
-#     # cv.imshow("segm", ref )
-#     # cv.imshow("segm", np.hstack((ref, segm_image)) )
-#     return ref
-
-def get_segmentation(image_name='000074_0.jpg', segm_dir=segm_dir, model_path='/home/liubov/course_work/segmentation/LIP_JPPNet/out_shape_384.pb'):
+def get_segmentation(image_name='000074_0.jpg', image_dir=image_dir, model_path='/home/liubov/course_work/segmentation/LIP_JPPNet/out_shape_384.pb'):
     image_path = os.path.join(data_dir, image_dir, image_name)
     segm_image = parse_human(image_path, model_path)
-    print(segm_image.shape)
-    return segm_image
+    return ref
 
 def get_src_image(image_name='000074_0.jpg', image_dir=image_dir):
     src_image = cv.imread(os.path.join(data_dir, image_dir, image_name))
-    width = src_image.shape[1]
-    height = src_image.shape[0]
-    src_image = cv.dnn.blobFromImage(src_image, 1.0 / 127.5, (width, height), (127.5, 127.5, 127.5), True, crop=False)
+    src_image = cv.dnn.blobFromImage(src_image, 1.0 / 127.5, mean=(127.5, 127.5, 127.5), swapRB=True)
     src_image = src_image.squeeze(0)
     return src_image
 
 def get_masks(segm_image, src_image):
-    # imread
     palette = {
         'Background'   : (0, 0, 0),
         'Hat'          : (128, 0, 0),
-        'Hair'         : (254, 0, 0),
+        'Hair'         : (255, 0, 0),
         'Glove'        : (0, 85, 0),
-        'Sunglasses'   : (169, 0, 51),
-        'UpperClothes' : (254, 85, 0),
+        'Sunglasses'   : (170, 0, 51),
+        'UpperClothes' : (255, 85, 0),
         'Dress'        : (0, 0, 85),
-        'Coat'         : (0, 119, 220),
-        'Socks'        : (85,85, 0),
+        'Coat'         : (0, 119, 221),
+        'Socks'        : (85, 85, 0),
         'Pants'        : (0, 85, 85),
         'Jumpsuits'    : (85, 51, 0),
         'Scarf'        : (52, 86, 128),
         'Skirt'        : (0, 128, 0),
-        'Face'         : (0, 0, 254),
-        'Left-arm'     : (51, 169, 220),
-        'Right-arm'    : (0, 254, 254),
-        'Left-leg'     : (85, 254, 169),
-        'Right-leg'    : (169, 254,85),
-        'Left-shoe'    : (254, 254, 0),
-        'Right-shoe'   : (254, 169, 0)
+        'Face'         : (0, 0, 255),
+        'Left-arm'     : (51, 170, 221),
+        'Right-arm'    : (0, 255, 255),
+        'Left-leg'     : (85, 255, 170),
+        'Right-leg'    : (170, 255, 85),
+        'Left-shoe'    : (255, 255, 0),
+        'Right-shoe'   : (255, 170, 0)
     }
-    # parse humangit 
-    # palette = {
-    #     'Background'   : (0, 0, 0),
-    #     'Hat'          : (128, 0, 0),
-    #     'Hair'         : (255, 0, 0),
-    #     'Glove'        : (0, 85, 0),
-    #     'Sunglasses'   : (170, 0, 51),
-    #     'UpperClothes' : (255, 85, 0),
-    #     'Dress'        : (0, 0, 85),
-    #     'Coat'         : (0, 119, 221),
-    #     'Socks'        : (85, 85, 0),
-    #     'Pants'        : (0, 85, 85),
-    #     'Jumpsuits'    : (85, 51, 0),
-    #     'Scarf'        : (52, 86, 128),
-    #     'Skirt'        : (0, 128, 0),
-    #     'Face'         : (0, 0, 255),
-    #     'Left-arm'     : (51, 170, 221),
-    #     'Right-arm'    : (0, 255, 255),
-    #     'Left-leg'     : (85, 255, 170),
-    #     'Right-leg'    : (170, 255, 85),
-    #     'Left-shoe'    : (255, 255, 0),
-    #     'Right-shoe'   : (255, 170, 0)
-    # }
     color2label = {val: key for key, val in palette.items()}
     head_labels = ['Hat', 'Hair', 'Sunglasses', 'Face']
 
     segm_image = cv.cvtColor(segm_image, cv.COLOR_BGR2RGB)
-    
+
     width = segm_image.shape[1]
     height = segm_image.shape[0]
 
@@ -378,7 +341,6 @@ def bilinear_sampler(img, grid):
     out = wa*Ia + wb*Ib + wc*Ic + wd*Id
     return out
 
-
 def run_tom(agnostic, warp_cloth, model_name='tom_2020.onnx'):
     net = cv.dnn.readNet(model_name)
     inp = np.concatenate([agnostic, warp_cloth], axis=1)
@@ -395,7 +357,6 @@ def run_tom(agnostic, warp_cloth, model_name='tom_2020.onnx'):
     m_composite = sigmoid(m_composite)
 
     p_tryon = warp_cloth * m_composite + p_rendered * (1 - m_composite)
-
     rgb_p_tryon = cv.cvtColor(p_tryon.squeeze(0).transpose(1, 2, 0), cv.COLOR_BGR2RGB)
     return rgb_p_tryon
 
@@ -406,7 +367,6 @@ def get_pair(pair_name='test_pairs.txt'):
         for line in fin:
             image_path, cloth_path = line.split()
             print(image_path, cloth_path)
-            # get_segmentation(image_path)
             test_net(image_path, cloth_path)
             # break
 
@@ -435,27 +395,25 @@ def test_net(image_path, cloth_path):
     cloth = cv.cvtColor(cloth, cv.COLOR_BGR2RGB)
     warped_cloth = warped_cloth.squeeze(0).transpose(1, 2, 0)
     warped_cloth = cv.cvtColor(warped_cloth, cv.COLOR_BGR2RGB)
-    first_line = np.hstack((cloth, warped_cloth))
 
     shape_mask = shape_mask.transpose(1, 2, 0)
     shape_mask = cv.cvtColor(shape_mask, cv.COLOR_GRAY2RGB)
     head_mask = head_mask.transpose(1, 2, 0)
     head_mask = cv.cvtColor(head_mask, cv.COLOR_BGR2RGB)
-    second_line = np.hstack((head_mask, shape_mask))
 
     inp_image = inp_image.transpose(1, 2, 0)
     inp_image = cv.cvtColor(inp_image, cv.COLOR_BGR2RGB)
-    third_line = np.hstack((inp_image, out))
 
     torch_path = os.path.join('result', 'tom_final.pth_31_10', 'test', 'try-on', image_path)
     torch_out = cv.imread(torch_path)
-    # torch_out = cv.cvtColor(torch_out, cv.COLOR_BGR2RGB)
-    
-    cv.imshow("torch_out", torch_out)
-    # segm_image = cv.cvtColor(segm_image, cv.COLOR_BGR2RGB)
-    # fouth_line = np.hstack((segm_image, torch_out))
 
-    cv.imshow("OpenCV", np.vstack((first_line, second_line, third_line)))
+    segm_image = (segm_image.astype(np.float32) - 127.5) / 127.5
+    torch_out = (torch_out.astype(np.float32) - 127.5) / 127.5
+
+    inputs  = np.hstack((cloth, inp_image, head_mask, torch_out))
+    outputs = np.hstack((warped_cloth, segm_image, shape_mask, out))
+
+    cv.imshow("OpenCV", np.vstack((inputs, outputs)))
     cv.waitKey()
 
 
