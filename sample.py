@@ -1,35 +1,44 @@
+import argparse
 import cv2 as cv
 import json
 import numpy as np
 import os
 
+from numpy import linalg
+from scipy.special import expit as sigmoid
 from segmentation_net import parse_human
+
+backends = (cv.dnn.DNN_BACKEND_DEFAULT, cv.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv.dnn.DNN_BACKEND_OPENCV)
+targets = (cv.dnn.DNN_TARGET_CPU, cv.dnn.DNN_TARGET_OPENCL, cv.dnn.DNN_TARGET_OPENCL_FP16, cv.dnn.DNN_TARGET_MYRIAD)
+
+parser = argparse.ArgumentParser(description='Use this script to run virtial try-on using CP-VTON',
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument('--input_image', '-i', help='Path to image with person. Skip this argument to capture frames from a camera.')
+parser.add_argument('--input_cloth', '-c', help='Path to target cloth image')
+parser.add_argument('--gmm_model', '-gmm', required=True, help='Path to onnx model.')
+parser.add_argument('--tom_model', '-tom', required=True, help='Path to onnx model.')
+parser.add_argument('--segmentation_model', required=True, help='Path to cloth segmentation pb model.')
+parser.add_argument('--openpose_proto', required=True, help='Path to prototxt.')
+parser.add_argument('--openpose_model', required=True, help='Path to caffemodel.')
+parser.add_argument('--backend', choices=backends, default=cv.dnn.DNN_BACKEND_DEFAULT, type=int,
+                    help="Choose one of computation backends: "
+                            "%d: automatically (by default), "
+                            "%d: Intel's Deep Learning Inference Engine (https://software.intel.com/openvino-toolkit), "
+                            "%d: OpenCV implementation" % backends)
+parser.add_argument('--target', choices=targets, default=cv.dnn.DNN_TARGET_CPU, type=int,
+                    help='Choose one of target computation devices: '
+                            '%d: CPU target (by default), '
+                            '%d: OpenCL, '
+                            '%d: OpenCL fp16 (half-float precision), '
+                            '%d: VPU' % targets)
+args, _ = parser.parse_known_args()
 
 print(cv.__version__)
 
-data_dir = os.path.join('data', 'test')
-cloth_dir = 'cloth'
-image_dir = 'image'
-segm_dir = 'image-parse'
+def get_segmentation(image_name, model_path):
+    return parse_human(image_name, model_path)
 
-
-def get_cloth(cloth_name='015392_1.jpg', cloth_dir=cloth_dir):
-    cloth = cv.imread(os.path.join(data_dir, cloth_dir, cloth_name))
-    c = cv.dnn.blobFromImage(cloth, 1.0 / 127.5, (cloth.shape[1], cloth.shape[0]), (127.5, 127.5, 127.5), True, crop=False)
-    return c
-
-def get_segmentation(image_name='000074_0.jpg', image_dir=image_dir, model_path='/home/liubov/course_work/segmentation/LIP_JPPNet/out_shape_384.pb'):
-    image_path = os.path.join(data_dir, image_dir, image_name)
-    segm_image = parse_human(image_path, model_path)
-    return ref
-
-def get_src_image(image_name='000074_0.jpg', image_dir=image_dir):
-    src_image = cv.imread(os.path.join(data_dir, image_dir, image_name))
-    src_image = cv.dnn.blobFromImage(src_image, 1.0 / 127.5, mean=(127.5, 127.5, 127.5), swapRB=True)
-    src_image = src_image.squeeze(0)
-    return src_image
-
-def get_masks(segm_image, src_image):
+def prepare_agnostic(segm_image, image_name, pose_map):
     palette = {
         'Background'   : (0, 0, 0),
         'Hat'          : (128, 0, 0),
@@ -56,7 +65,7 @@ def get_masks(segm_image, src_image):
     head_labels = ['Hat', 'Hair', 'Sunglasses', 'Face']
 
     segm_image = cv.cvtColor(segm_image, cv.COLOR_BGR2RGB)
-
+    
     width = segm_image.shape[1]
     height = segm_image.shape[0]
 
@@ -72,7 +81,13 @@ def get_masks(segm_image, src_image):
                     pose_shape[r, c, 0] = 255
 
     phead = phead.astype(np.float32)
-    img_head = src_image * phead - (1 - phead)
+
+    input_image = cv.imread(image_name)
+    input_image = cv.cvtColor(input_image, cv.COLOR_BGR2RGB)
+    input_image = (input_image - 127.5) / 127.5
+    input_image = input_image.transpose(2, 0, 1)
+
+    img_head = input_image * phead - (1 - phead)
 
     from PIL import Image
     pose_shape = pose_shape.astype(np.uint8).reshape(pose_shape.shape[0], pose_shape.shape[1])
@@ -82,15 +97,20 @@ def get_masks(segm_image, src_image):
     parse_shape = parse_shape.resize((width, height), Image.BILINEAR)
     res_shape = np.array(parse_shape)
 
-    res_shape = cv.dnn.blobFromImage(res_shape, 1.0 / 127.5, (res_shape.shape[1], res_shape.shape[0]), (127.5, 127.5, 127.5), True, crop=False)
+    res_shape = cv.dnn.blobFromImage(res_shape, 1.0 / 127.5, mean=(127.5, 127.5, 127.5), swapRB=True)
     res_shape = res_shape.squeeze(0)
-    return res_shape, img_head
 
-def get_pose_map(height, width, radius, image_name='000074_0.jpg', image_dir=image_dir, proto_path='/home/liubov/work_spase/opencv_extra/testdata/dnn/openpose_pose_coco.prototxt'):
-    image_path = os.path.join(data_dir, image_dir, image_name)
-    net = cv.dnn.readNet(proto_path, proto_path.split('.')[0] + '.caffemodel')
-    # net.setPreferableBackend(backend)
-    # net.setPreferableTarget(target)
+    agnostic = np.concatenate((res_shape, img_head, pose_map), axis=0)
+    agnostic = np.expand_dims(agnostic, axis=0)
+    return agnostic
+
+def get_pose_map(image_path, proto_path, model_path, backend, target):
+    height = 256
+    width = 192
+    radius = 5
+    net = cv.dnn.readNet(proto_path, model_path)
+    net.setPreferableBackend(backend)
+    net.setPreferableTarget(target)
     img = cv.imread(image_path)
     inp = cv.dnn.blobFromImage(img, 1.0/255, (width, height), (0, 0, 0), swapRB=False, crop=False)
     net.setInput(inp)
@@ -114,12 +134,16 @@ def get_pose_map(height, width, radius, image_name='000074_0.jpg', image_dir=ima
     pose_map = pose_map.transpose(2, 0, 1)
     return pose_map
 
-def prepare_agnostic(res_shape, img_head, pose_map):
-    agnostic = np.concatenate((res_shape, img_head, pose_map), axis=0)
-    agnostic = np.expand_dims(agnostic, axis=0)
-    return agnostic
+def get_warped_cloth(cloth_path, agnostic, model, backend, target):
+    cloth_img = cv.imread(cloth_path)
+    cloth = cv.dnn.blobFromImage(cloth_img, 1.0 / 127.5, mean=(127.5, 127.5, 127.5), swapRB=True)
 
-def run_gmm(agnostic, c, model_name='gmm_22_01.onnx'):
+    theta = run_gmm(agnostic, cloth, model, backend, target)
+    grid = postprocess(theta)
+    warped_cloth = bilinear_sampler(cloth, grid).astype(np.float32)
+    return warped_cloth
+
+def run_gmm(agnostic, c, model, backend, target):
     class CorrelationLayer(object):
         def __init__(self, params, blobs):
             super(CorrelationLayer, self).__init__()
@@ -144,24 +168,17 @@ def run_gmm(agnostic, c, model_name='gmm_22_01.onnx'):
             return [correlation_tensor]
 
     cv.dnn_registerLayer('Correlation', CorrelationLayer)
-    net = cv.dnn.readNet(model_name)
+    net = cv.dnn.readNet(model)
 
     net.setInput(agnostic, "input.1")
     net.setInput(c, "input.18")
-    net.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV)
-    net.setPreferableTarget(cv.dnn.DNN_TARGET_CPU)
+    net.setPreferableBackend(backend)
+    net.setPreferableTarget(target)
     theta = net.forward()
 
     cv.dnn_unregisterLayer('Correlation')
     return theta
 
-def get_warped_cloth(c, theta):
-    grid = postprocess(theta)
-    warped_cloth = bilinear_sampler(c, grid)
-    return warped_cloth
-
-
-from numpy.linalg import inv, det
 def compute_L_inverse(X, Y):
     N = X.shape[0]
 
@@ -178,7 +195,7 @@ def compute_L_inverse(X, Y):
     first = np.concatenate((K, P), axis=1)
     second = np.concatenate((P.transpose(1, 0), Z), axis=1)
     L = np.concatenate((first, second), axis=0)
-    Li = inv(L)
+    Li = linalg.inv(L)
     return Li
 
 def prepare_to_transform(out_h=256, out_w=192, grid_size=5):
@@ -341,19 +358,16 @@ def bilinear_sampler(img, grid):
     out = wa*Ia + wb*Ib + wc*Ic + wd*Id
     return out
 
-def run_tom(agnostic, warp_cloth, model_name='tom_2020.onnx'):
-    net = cv.dnn.readNet(model_name)
+def get_tryon(agnostic, warp_cloth, model, backend, target):
+    net = cv.dnn.readNet(model)
     inp = np.concatenate([agnostic, warp_cloth], axis=1)
-
     net.setInput(inp)
-    net.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV)
-    net.setPreferableTarget(cv.dnn.DNN_TARGET_CPU)
+    net.setPreferableBackend(backend)
+    net.setPreferableTarget(target)
     out = net.forward()
 
     p_rendered, m_composite = np.split(out, [3], axis=1)
     p_rendered = np.tanh(p_rendered)
-
-    from scipy.special import expit as sigmoid
     m_composite = sigmoid(m_composite)
 
     p_tryon = warp_cloth * m_composite + p_rendered * (1 - m_composite)
@@ -361,61 +375,16 @@ def run_tom(agnostic, warp_cloth, model_name='tom_2020.onnx'):
     return rgb_p_tryon
 
 
-def get_pair(pair_name='test_pairs.txt'):
-    path = os.path.join('data', pair_name)
-    with open(path) as fin:
-        for line in fin:
-            image_path, cloth_path = line.split()
-            print(image_path, cloth_path)
-            test_net(image_path, cloth_path)
-            # break
-
-
-def test_net(image_path, cloth_path):
-    height = 256
-    width = 192
-    radius = 5
-
-    cloth = get_cloth(cloth_path)
-
-    pose = get_pose_map(height, width, radius, image_path)
-    segm_image = get_segmentation(image_path)
-    inp_image = get_src_image(image_path)
-    shape_mask, head_mask = get_masks(segm_image, inp_image)
-    agnostic = prepare_agnostic(shape_mask, head_mask, pose)
-    theta = run_gmm(agnostic, cloth)
-    grid = postprocess(theta)
-
-    warped_cloth = bilinear_sampler(cloth, grid).astype(np.float32)
-    out = run_tom(agnostic, warped_cloth)
-
-    # Visualize
-
-    cloth = cloth.squeeze(0).transpose(1, 2, 0)
-    cloth = cv.cvtColor(cloth, cv.COLOR_BGR2RGB)
-    warped_cloth = warped_cloth.squeeze(0).transpose(1, 2, 0)
-    warped_cloth = cv.cvtColor(warped_cloth, cv.COLOR_BGR2RGB)
-
-    shape_mask = shape_mask.transpose(1, 2, 0)
-    shape_mask = cv.cvtColor(shape_mask, cv.COLOR_GRAY2RGB)
-    head_mask = head_mask.transpose(1, 2, 0)
-    head_mask = cv.cvtColor(head_mask, cv.COLOR_BGR2RGB)
-
-    inp_image = inp_image.transpose(1, 2, 0)
-    inp_image = cv.cvtColor(inp_image, cv.COLOR_BGR2RGB)
-
-    torch_path = os.path.join('result', 'tom_final.pth_31_10', 'test', 'try-on', image_path)
-    torch_out = cv.imread(torch_path)
-
-    segm_image = (segm_image.astype(np.float32) - 127.5) / 127.5
-    torch_out = (torch_out.astype(np.float32) - 127.5) / 127.5
-
-    inputs  = np.hstack((cloth, inp_image, head_mask, torch_out))
-    outputs = np.hstack((warped_cloth, segm_image, shape_mask, out))
-
-    cv.imshow("OpenCV", np.vstack((inputs, outputs)))
-    cv.waitKey()
-
-
 if __name__ == "__main__":
-    get_pair()
+    # get_pair()
+    pose = get_pose_map(args.input_image, args.openpose_proto, args.openpose_model, args.backend, args.target)
+    segm_image = get_segmentation(args.input_image, args.segmentation_model)
+
+    agnostic = prepare_agnostic(segm_image, args.input_image, pose)
+    warped_cloth = get_warped_cloth(args.input_cloth, agnostic, args.gmm_model, args.backend, args.target)
+    output = get_tryon(agnostic, warped_cloth, args.tom_model, args.backend, args.target)
+
+    winName = 'Deep learning virtual try-on in OpenCV'
+    cv.namedWindow(winName, cv.WINDOW_AUTOSIZE)
+    cv.imshow(winName, output)
+    cv.waitKey()
